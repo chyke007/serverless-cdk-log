@@ -1,0 +1,154 @@
+name: Build and Deploy Logger to ECS
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/sample_logger.py'
+      - 'Dockerfile'
+      - '.github/workflows/logger-deploy.yml'
+      - 'requirements.txt'
+      - 'app.py'
+      - 'app/**'
+      - 'cdk.json'
+
+env:
+  ECR_REPO: ecrstack-logger-repo
+  ECR_GRAFANA_REPO: ecrstack-grafana-repo
+  ECR_LOKI_REPO: ecrstack-loki-repo
+  ECS_CLUSTER: ecsstack-cluster
+  LOGGER_SERVICE: logger-service
+  GRAFANA_SERVICE: grafana-service
+  LOKI_SERVICE: loki-service
+  AWS_REGION: us-east-1
+  IMAGE_TAG: ${{ github.sha }}
+  SERVER_CERT_ARN:  ${{ secrets.SERVER_CERT_ARN }}
+  CLIENT_CERT_ARN:  ${{ secrets.CLIENT_CERT_ARN }}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSUME_ROLE_ARN }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Logger Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t logger-app:${IMAGE_TAG} .
+          docker tag logger-app:${IMAGE_TAG} $ECR_REGISTRY/$ECR_REPO:${IMAGE_TAG}
+
+      - name: Push Logger Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPO:${IMAGE_TAG}
+
+      - name: Build Grafana Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -f app/config/grafana/Dockerfile -t grafana-app:${IMAGE_TAG} .
+          docker tag grafana-app:${IMAGE_TAG} $ECR_REGISTRY/$ECR_GRAFANA_REPO:${IMAGE_TAG}
+
+      - name: Push Grafana Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_GRAFANA_REPO:${IMAGE_TAG}
+
+      - name: Build Loki Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -f app/config/loki/Dockerfile -t loki-app:${IMAGE_TAG} .
+          docker tag loki-app:${IMAGE_TAG} $ECR_REGISTRY/$ECR_LOKI_REPO:${IMAGE_TAG}
+
+      - name: Push Loki Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_LOKI_REPO:${IMAGE_TAG}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSUME_ROLE_ARN }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-update
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Install CDK
+        run: npm install -g aws-cdk
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Deploy CDK stack
+        run: |
+          cdk deploy --all \
+          -c vpn_server_cert_arn="$SERVER_CERT_ARN" \
+          -c vpn_client_cert_arn="$CLIENT_CERT_ARN" \
+          --require-approval never
+      
+      - name: Update Logger ECS service with new image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-update.outputs.registry }}
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $LOGGER_SERVICE --region $AWS_REGION --query "services[0].taskDefinition" --output text)
+          aws ecs describe-task-definition --task-definition $TASK_DEF_ARN --region $AWS_REGION > logger-task-def.json
+          cat logger-task-def.json | jq '.taskDefinition | {family, executionRoleArn, taskRoleArn, networkMode, containerDefinitions, requiresCompatibilities, cpu, memory, volumes}' > logger-task-def-min.json
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG"
+          cat logger-task-def-min.json | jq --arg IMAGE_URI "$IMAGE_URI" ' .containerDefinitions[0].image = $IMAGE_URI ' > logger-task-def-updated.json
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://logger-task-def-updated.json --region $AWS_REGION --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster $ECS_CLUSTER --service $LOGGER_SERVICE --task-definition $NEW_TASK_DEF_ARN --region $AWS_REGION
+
+      - name: Update Grafana ECS service with new image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-update.outputs.registry }}
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $GRAFANA_SERVICE --region $AWS_REGION --query "services[0].taskDefinition" --output text)
+          aws ecs describe-task-definition --task-definition $TASK_DEF_ARN --region $AWS_REGION > grafana-task-def.json
+          cat grafana-task-def.json | jq '.taskDefinition | {family, executionRoleArn, taskRoleArn, networkMode, containerDefinitions, requiresCompatibilities, cpu, memory, volumes}' > grafana-task-def-min.json
+          IMAGE_URI="$ECR_REGISTRY/$ECR_GRAFANA_REPO:$IMAGE_TAG"
+          cat grafana-task-def-min.json | jq --arg IMAGE_URI "$IMAGE_URI" ' .containerDefinitions[0].image = $IMAGE_URI ' > grafana-task-def-updated.json
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://grafana-task-def-updated.json --region $AWS_REGION --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster $ECS_CLUSTER --service $GRAFANA_SERVICE --task-definition $NEW_TASK_DEF_ARN --region $AWS_REGION
+
+      - name: Update Loki ECS service with new image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-update.outputs.registry }}
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $LOKI_SERVICE --region $AWS_REGION --query "services[0].taskDefinition" --output text)
+          aws ecs describe-task-definition --task-definition $TASK_DEF_ARN --region $AWS_REGION > loki-task-def.json
+          cat loki-task-def.json | jq '.taskDefinition | {family, executionRoleArn, taskRoleArn, networkMode, containerDefinitions, requiresCompatibilities, cpu, memory, volumes}' > loki-task-def-min.json
+          IMAGE_URI="$ECR_REGISTRY/$ECR_LOKI_REPO:$IMAGE_TAG"
+          cat loki-task-def-min.json | jq --arg IMAGE_URI "$IMAGE_URI" ' .containerDefinitions[0].image = $IMAGE_URI ' > loki-task-def-updated.json
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://loki-task-def-updated.json --region $AWS_REGION --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster $ECS_CLUSTER --service $LOKI_SERVICE --task-definition $NEW_TASK_DEF_ARN --region $AWS_REGION 

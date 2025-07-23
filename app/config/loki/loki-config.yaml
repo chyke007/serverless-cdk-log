@@ -1,0 +1,55 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+
+common:
+  path_prefix: /var/loki
+  storage:
+    s3:
+      bucketnames: serverless-log-bucket-cdk
+      region: us-east-1
+      http_config:
+        response_header_timeout: 5s
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: memberlist
+
+ingester:
+  lifecycler:
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    final_sleep: 0s
+  chunk_idle_period: 5m
+  chunk_retain_period: 30s
+  max_chunk_age: 1h
+  wal:
+    enabled: true
+    dir: /var/loki/wal
+
+compactor:
+  working_directory: /var/loki/compactor
+
+schema_config:
+  configs:
+    - from: 2020-07-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+  
+limits_config:
+  retention_period: 2160h # 90 days 
+  reject_old_samples: true
+  reject_old_samples_max_age: 2160h # 90 days 
+  volume_enabled: true
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 168h

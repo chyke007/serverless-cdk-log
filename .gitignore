@@ -1,0 +1,15 @@
+*.swp
+package-lock.json
+__pycache__/
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+vpn-certs/
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out

@@ -1,0 +1,6 @@
+# AWS CDK and Python logger requirements
+aws-cdk-lib
+constructs>=10.0.0,<11.0.0
+FastAPI
+uvicorn
+# No extra requirements for sample_logger.py (uses standard library + FastAPI)
