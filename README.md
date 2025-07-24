@@ -1,5 +1,6 @@
-# Welcome to your Serverless monitoring and Logging powered by AWS CDK!
+# Serverless Logging and Visualization powered by AWS CDK!
 
+## Architecture Diagram
 <br>
   <img src="https://github.com/chyke007/serverless-cdk-log/blob/main/architecture/architecture_diagram.png" alt="Architecture" width="700"/>
 <br>
@@ -93,7 +94,7 @@ This project deploys a modern AWS logging and monitoring stack using ECS Fargate
   - Only the logger app is public; Grafana and Loki are private.
   - To access Grafana, connection to Client VPN is required
 
-## Architecture Diagram
+## Architecture Diagram(in mermaid)
 
 See the mermaid architecture below:
 
