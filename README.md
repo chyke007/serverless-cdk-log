@@ -1,16 +1,11 @@
-# Welcome to your CDK Python project!
+# Welcome to your Serverless monitoring and Logging powered by AWS CDK!
 
-This is a blank project for CDK development with Python.
+<br>
+  <img src="https://github.com/chyke007/serverless-cdk-log/blob/main/architecture/architecture_diagram.png" alt="Architecture" width="700"/>
+<br>
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
 
-This project is set up like a standard Python project.  The initialization
-process also creates a virtualenv within this project, stored under the `.venv`
-directory.  To create the virtualenv it assumes that there is a `python3`
-(or `python` for Windows) executable in your path with access to the `venv`
-package. If for any reason the automatic creation of the virtualenv fails,
-you can create the virtualenv manually.
-
+## Setup
 To manually create a virtualenv on MacOS and Linux:
 
 ```
@@ -96,39 +91,61 @@ This project deploys a modern AWS logging and monitoring stack using ECS Fargate
   - Logs are sent to Loki and S3.
   - Grafana reads logs from Loki for visualization.
   - Only the logger app is public; Grafana and Loki are private.
+  - To access Grafana, connection to Client VPN is required
 
 ## Architecture Diagram
 
-See the full architecture below (render with a Mermaid plugin or VSCode extension):
+See the mermaid architecture below:
 
 ```mermaid
 graph TD
-  subgraph PublicSubnet
-    ALBLogger["Public ALB (8080)"]
-    LoggerService["ECS Fargate: Logger App"]
-    ALBLogger -->|Target Group| LoggerService
+  subgraph VPC["VPC (10.0.0.0/16)"]
+    
+    subgraph PublicSubnet["Public Subnet"]
+      ALBLogger["Public ALB (Listener: 8080)<br>Security Group: Allows Internet -> Logger"]
+      LoggerService["ECS Fargate Service: Logger App<br>Task Definition: logger-task"]
+      ECRLogger["Amazon ECR: Logger Image<br>(ecrstack-logger-repo)"]
+      ALBLogger -->|Target Group| LoggerService
+    end
+
+    subgraph PrivateSubnet["Private Subnet"]
+      ALBGrafana["Private ALB (Listener: 3000)<br>Security Group: Internal Access"]
+      ALBLoki["Private ALB (Listener: 3100)<br>Security Group: Internal Access"]
+      GrafanaService["ECS Fargate Service: Grafana<br>Task Definition: grafana-task"]
+      LokiService["ECS Fargate Service: Loki<br>Task Definition: loki-task"]
+      ECRGrafana["Amazon ECR: Grafana Image<br>(ecrstack-grafana-repo)"]
+      ECRLoki["Amazon ECR: Loki Image<br>(ecrstack-loki-repo)"]
+      EFS["Amazon EFS (Persistent Storage)<br>Access Points for Grafana & Loki"]
+      S3["Amazon S3 (Log Archive Bucket)<br>serverless-log-bucket-cdk"]
+      
+      ALBGrafana -->|Target Group| GrafanaService
+      ALBLoki -->|Target Group| LokiService
+      GrafanaService -- Mount --> EFS
+      LokiService -- Mount --> EFS
+      LokiService -- Push WAL & Chunks --> S3
+    end
+
+    subgraph Route53["Route 53 Private Hosted Zone<br>(internal.com)"]
+      DNSGrafana["grafana.internal.com -> Private ALB"]
+      DNSLoki["loki.internal.com -> Private ALB"]
+      DNSGrafana --> ALBGrafana
+      DNSLoki --> ALBLoki
+    end
+
+    subgraph ClientVPN["AWS Client VPN"]
+      VPNEndpoint["Client VPN Endpoint<br>(Mutual TLS Auth)<br>Security Group: Allows DNS & ALB Access"]
+      VPNEndpoint --> DNSGrafana
+      VPNEndpoint --> DNSLoki
+    end
+
+    LoggerService -- Logs via FireLens --> LokiService
+    GrafanaService -- Queries Metrics --> LokiService
+    LoggerService -- Container Images --> ECRLogger
+    GrafanaService -- Container Images --> ECRGrafana
+    LokiService -- Container Images --> ECRLoki
   end
 
-  subgraph PrivateSubnet
-    ALBGrafana["Private ALB (3000)\n(Grafana)"]
-    ALBLoki["Private ALB (3100)\n(Loki)"]
-    GrafanaService["ECS Fargate: Grafana"]
-    LokiService["ECS Fargate: Loki"]
-    EFS["EFS (Grafana data)"]
-    S3["S3 (Logs)"]
-    ALBGrafana -->|Target Group| GrafanaService
-    ALBLoki -->|Target Group| LokiService
-    GrafanaService -- EFS Mount --> EFS
-    LokiService -- Log Export --> S3
-  end
-
-  VPC["VPC"]
-  VPC --> PublicSubnet
-  VPC --> PrivateSubnet
-  LoggerService -- Logs --> S3
-  LoggerService -- Logs --> LokiService
-  GrafanaService -- Reads Logs --> LokiService
-  note1["Note: Only Logger App is public. Grafana/Loki are private."]
+  note1["Note: Logger Service is public via ALB.<br>Grafana & Loki are private and accessed via Client VPN."]
 ```
 
 ## Deploying with GitHub Actions
@@ -136,9 +153,10 @@ graph TD
  GitHub Actions workflow is provided to build, push, and deploy the logger app to ECS. Set the following secrets in your GitHub repository:
 - `SERVER_CERT_ARN`
 - `CLIENT_CERT_ARN`
+- `ASSUME_ROLE_ARN`
 
 The workflow will:
-- Build and push the Docker image for the logger app
+- Build and push the Docker image for the logger app, grafana and loki
 - Deploy the CDK stack (including ECS, ALBs, EFS, S3, etc.)
-- Redploy the ECS service, using new task definitions
+- Redeploy the ECS services(logger app, grafana and loki) using new task definitions with latest build image
 
