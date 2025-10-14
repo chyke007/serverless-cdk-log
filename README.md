@@ -1,8 +1,8 @@
-# Serverless Logging and Visualization powered by AWS CDK!
+# Serverless Observability Platform powered by AWS CDK!
 
 ## Architecture Diagram
 <br>
-  <img src="https://github.com/chyke007/serverless-cdk-log/blob/main/architecture/architecture_diagram.png" alt="Architecture" width="700"/>
+  <img src="https://github.com/chyke007/serverless-cdk-log/blob/main/architecture/architecture_diagram_observability.png" alt="Architecture" width="700"/>
 <br>
 
 
@@ -50,9 +50,15 @@ command.
  * `cdk diff`        compare deployed stack with current state
  * `cdk docs`        open CDK documentation
 
-## Sample Python Logger Web App
+## Sample Python Observability Web App
 
-A sample logger web app is provided in `app/sample_logger.py` that generates random logs and exposes a web endpoint. Each visit to `/` logs a timestamped message. The app is built with **FastAPI**.
+A sample observability web app is provided in `app/sample_logger.py` that demonstrates comprehensive monitoring capabilities. The app is built with **FastAPI** and includes:
+
+- **Logging**: Structured logging with multiple severity levels
+- **Metrics**: Custom business metrics and AWS service metrics
+- **Tracing**: Distributed tracing with OpenTelemetry and AWS X-Ray
+- **AWS Integration**: SQS message processing and DynamoDB operations
+- **Health Checks**: Application health monitoring endpoints
 
 ### How to run locally
 
@@ -69,6 +75,17 @@ uvicorn app.sample_logger:app --host 0.0.0.0 --port 8080
 
 Visit [http://localhost:8080](http://localhost:8080) in your browser.
 
+### Available Endpoints
+
+- `GET /` - Main endpoint with basic logging and metrics
+- `GET /health` - Health check endpoint
+- `GET /test-telemetry` - Test OpenTelemetry instrumentation
+- `POST /send-message` - Send message to SQS queue
+- `GET /receive-messages` - Receive messages from SQS queue
+- `POST /save-data` - Save data to DynamoDB
+- `GET /get-data/{data_id}` - Retrieve data from DynamoDB
+- `GET /workflow` - Complete workflow (DynamoDB + SQS)
+
 ### How to run in Docker
 
 ```bash
@@ -78,21 +95,39 @@ docker run -p 8080:8080 logger-app
 
 ## Architecture
 
-This project deploys a modern AWS logging and monitoring stack using ECS Fargate, ALB, EFS, S3, and FireLens. The architecture is as follows:
+This project deploys a comprehensive AWS observability platform using ECS Fargate, ALB, EFS, S3, OpenTelemetry, AWS X-Ray, and AWS Managed Prometheus. The architecture provides full observability with logs, metrics, and traces.
 
-- **Logger App**: Runs as an ECS Fargate service, exposed via a public Application Load Balancer (ALB) on port 8080. Anyone can access it from the internet.
-- **Grafana & Loki**: Both run as ECS Fargate services in private subnets, each behind a private/internal ALB (Grafana on 3000, Loki on 3100). They are not accessible from the public internet.
-- **EFS**: Used by Grafana for persistent storage of dashboards and settings.
-- **S3**: Used for log storage and backup.
-- **FireLens**: Sidecar containers forward logs from ECS tasks to Loki and/or S3.
-- **Security Groups**: Restrict access so only the ALB can reach the ECS services, and only ECS can reach EFS.
-- **Flow**:
-  - Users access the logger app via the public ALB.
-  - Logger app generates logs and exposes a web endpoint.
-  - Logs are sent to Loki and S3.
-  - Grafana reads logs from Loki for visualization.
-  - Only the logger app is public; Grafana and Loki are private.
-  - To access Grafana, connection to Client VPN is required
+### Core Components
+
+- **Logger App**: Runs as an ECS Fargate service with OpenTelemetry instrumentation, exposed via a public ALB on port 8080
+- **Grafana**: Visualization platform running in private subnet, accessible via internal ALB on port 3000. To access Grafana, connection to Client VPN is required
+- **Loki**: Log aggregation system running in private subnet on port 3100
+- **AWS X-Ray**: Distributed tracing service for request flow analysis
+- **AWS Managed Prometheus (AMP)**: Fully managed metrics storage and querying
+- **SQS**: Message queuing for asynchronous processing
+- **DynamoDB**: NoSQL database for application data storage
+- **EFS**: Persistent storage for Grafana dashboards and configurations
+- **S3**: Log archival and backup storage
+
+### Observability Stack
+
+- **Logs**: Structured logging via FireLens → Loki → Grafana
+- **Metrics**: Custom metrics via OpenTelemetry → AMP → Grafana
+- **Traces**: Distributed tracing via OpenTelemetry → X-Ray → Grafana
+- **Security**: Container image scanning with Trivy and ECR scan-on-push
+
+### Data Flow
+
+1. **Application Layer**: Logger app generates logs, metrics, and traces
+2. **Collection**: OpenTelemetry collector (ADOT) aggregates telemetry data
+3. **Storage**: 
+   - Logs → Loki (via FireLens)
+   - Metrics → AWS Managed Prometheus
+   - Traces → AWS X-Ray
+   - Data → DynamoDB
+   - Messages → SQS
+4. **Visualization**: Grafana queries all data sources for unified dashboards
+5. **Security**: Trivy scans container images for vulnerabilities
 
 ## Architecture Diagram(in mermaid)
 
@@ -149,15 +184,44 @@ graph TD
   note1["Note: Logger Service is public via ALB.<br>Grafana & Loki are private and accessed via Client VPN."]
 ```
 
+## Security & Compliance
+
+### Container Security
+- **ECR Scan on Push**: Automatic vulnerability scanning for all container images
+- **Trivy Integration**: GitHub Actions workflow scans for vulnerabilities on every push/PR
+- **SARIF Upload**: Security findings are automatically uploaded to GitHub Security tab
+
+### Security Features
+- **Zero-Trust Architecture**: Private subnets for sensitive components
+- **IAM Least Privilege**: Granular permissions for each service
+- **Encryption**: Data encrypted in transit and at rest
+- **Network Isolation**: Security groups restrict access between components
+
 ## Deploying with GitHub Actions
 
- GitHub Actions workflow is provided to build, push, and deploy the logger app to ECS. Set the following secrets in your GitHub repository:
+GitHub Actions workflow is provided to build, push, and deploy the observability platform to AWS. Set the following secrets in your GitHub repository:
 - `SERVER_CERT_ARN`
-- `CLIENT_CERT_ARN`
+- `CLIENT_CERT_ARN` 
 - `ASSUME_ROLE_ARN`
 
 The workflow will:
-- Build and push the Docker image for the logger app, grafana and loki
-- Deploy the CDK stack (including ECS, ALBs, EFS, S3, etc.)
-- Redeploy the ECS services(logger app, grafana and loki) using new task definitions with latest build image
+- Build and push Docker images for logger app, Grafana, and Loki
+- Run Trivy security scans and upload SARIF results
+- Deploy the CDK stack (ECS, ALBs, EFS, S3, AMP, X-Ray, SQS, DynamoDB)
+- Redeploy ECS services with latest container images
+- Configure observability data sources in Grafana
+
+## Monitoring & Alerting
+
+### Available Dashboards
+- **Application Metrics**: Request rates, response times, error rates
+- **Infrastructure Metrics**: CPU, memory, network utilization
+- **Business Metrics**: Custom application metrics and KPIs
+- **Distributed Traces**: Request flow analysis across services
+- **Security Metrics**: Container vulnerability reports
+
+### Alerting Capabilities
+- **Grafana Alerts**: Configurable alerts based on metrics thresholds
+- **AWS CloudWatch**: Native AWS monitoring and alerting
+- **X-Ray Insights**: Automatic anomaly detection for traces
 
