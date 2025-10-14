@@ -11,7 +11,9 @@ from app.modules.alb_stack import AlbStack
 from app.modules.ecs_stack import EcsStack
 from app.modules.route53_stack import Route53Stack
 from app.modules.client_vpn_stack import ClientVpnStack
-
+from app.modules.amp_stack import AmpStack
+from app.modules.sqs_stack import SqsStack
+from app.modules.dynamodb_stack import DynamoDbStack
 
 app = cdk.App()
 
@@ -27,6 +29,10 @@ efs_stack = EfsStack(app, "EfsStack", vpc=vpc_stack.vpc, sg=sg_stack.efs_sg)
 efs_ap_stack = EfsAccessPointsStack(app, "EfsAccessPointsStack", file_system=efs_stack.efs)
 efs_ap_stack.add_dependency(efs_stack)
 
+# AMP Stack
+amp_stack = AmpStack(app, "AmpStack")
+sqs_stack = SqsStack(app, "SqsStack")
+dynamodb_stack = DynamoDbStack(app, "DynamoDbStack")
 
 ecs_stack = EcsStack(
     app, "EcsStack",
@@ -39,7 +45,10 @@ ecs_stack = EcsStack(
     ecr_grafana=ecr_stack.grafana_repo,
     ecr_loki=ecr_stack.loki_repo,
     ecr_logger=ecr_stack.logger_repo,
-    alb_stack=alb_stack
+    alb_stack=alb_stack,
+    amp_workspace=amp_stack.workspace,
+    sqs_stack=sqs_stack,
+    dynamodb_stack=dynamodb_stack
 )
 
 route54_stack = Route53Stack(app, "Route53Stack", vpc=vpc_stack.vpc, internal_alb=alb_stack.internal_alb)

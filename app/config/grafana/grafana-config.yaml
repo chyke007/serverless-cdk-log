@@ -8,3 +8,31 @@ datasources:
     url: http://loki.internal.com:80
     version: 1
     editable: true
+  - name: Amazon Managed Prometheus
+    type: grafana-amazonprometheus-datasource
+    access: proxy
+    url: ${AMP_WORKSPACE_URL}
+    editable: true
+    isDefault: false
+    jsonData:
+      defaultRegion: us-east-1
+      authType: 'default'
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: 2.40.0
+      cacheLevel: 'High'
+      disableRecordingRules: false
+      incrementalQueryOverlapWindow: 10m
+      sigV4Auth: true
+      sigV4AuthType: 'workspace'
+      sigV4Region: 'us-east-1'
+
+  - name: AWS Application Signals
+    type: grafana-x-ray-datasource
+    access: proxy
+    editable: true
+    isDefault: false
+    jsonData:
+      defaultRegion: us-east-1
+      authType: 'default'

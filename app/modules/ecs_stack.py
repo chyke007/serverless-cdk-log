@@ -6,14 +6,18 @@ from aws_cdk import (
     aws_s3 as s3,
     aws_ecr as ecr,
     aws_elasticloadbalancingv2 as elbv2,
+    # Logger Service with multiple target groups
+    aws_ecs_patterns as ecs_patterns,
     aws_logs as logs,
     aws_iam as iam,
+    aws_ssm as ssm,
     Stack
 )
+        
 from constructs import Construct
 
 class EcsStack(Stack):
-    def __init__(self, scope: Construct, id: str, vpc, ecs_sg, efs, efs_grafana_ap, efs_loki_ap, s3_bucket, ecr_grafana, ecr_loki, ecr_logger, alb_stack, **kwargs):
+    def __init__(self, scope: Construct, id: str, vpc, ecs_sg, efs, efs_grafana_ap, efs_loki_ap, s3_bucket, ecr_grafana, ecr_loki, ecr_logger, alb_stack, amp_workspace, sqs_stack, dynamodb_stack, **kwargs):
         super().__init__(scope, id, **kwargs)
 
         # ECS Cluster
@@ -29,6 +33,13 @@ class EcsStack(Stack):
             role_name="ExecutionRole"
         )
 
+        # Add Add AMP permissions, CloudWatch permissions and  X-Ray metrics)
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AmazonPrometheusFullAccess"))
+        execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AmazonPrometheusFullAccess"))
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchFullAccess"))
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AWSXRayDaemonWriteAccess"))
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AWSXrayReadOnlyAccess"))
+
         # Grant EFS access (file system and access points)
         task_role.add_to_policy(iam.PolicyStatement(
             actions=[
@@ -40,10 +51,10 @@ class EcsStack(Stack):
             resources=[
                 efs.file_system_arn,
                 efs_grafana_ap.access_point_arn,
-                efs_loki_ap.access_point_arn
+                efs_loki_ap.access_point_arn,
             ]
         ))
-       
+
         execution_role.add_to_policy(iam.PolicyStatement(
             actions=[
                 "elasticfilesystem:ClientMount",
@@ -54,10 +65,14 @@ class EcsStack(Stack):
             resources=[
                 efs.file_system_arn,
                 efs_grafana_ap.access_point_arn,
-                efs_loki_ap.access_point_arn
+                efs_loki_ap.access_point_arn,
             ]
         ))
-       
+
+        # Add ADOT Collector execution role permissions
+        execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy"))
+        execution_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchLogsFullAccess"))
+
         # Grant S3 access for Loki
         task_role.add_to_policy(iam.PolicyStatement(
             actions=[
@@ -85,6 +100,13 @@ class EcsStack(Stack):
             ]
         ))
 
+        # Grant SQS permissions to the task role (avoid cross-stack policy attachment)
+        sqs_stack.message_queue.grant_send_messages(task_role)
+        sqs_stack.message_queue.grant_consume_messages(task_role)
+
+        # Grant DynamoDB permissions to the task role (avoid cross-stack policy attachment)
+        dynamodb_stack.app_table.grant_read_write_data(task_role)
+
         # Grafana Task Definition
         grafana_task_def = ecs.FargateTaskDefinition(
             self, "GrafanaTaskDef",
@@ -109,7 +131,12 @@ class EcsStack(Stack):
             "GrafanaContainer",
             image=ecs.ContainerImage.from_ecr_repository(ecr_grafana),
             logging=ecs.LogDriver.aws_logs(stream_prefix="grafana"),
-            environment={"GF_SECURITY_ADMIN_PASSWORD": "admin"}
+            environment={
+                "GF_SECURITY_ADMIN_PASSWORD": "admin",
+                "AMP_WORKSPACE_URL": amp_workspace.attr_prometheus_endpoint,
+                "AWS_SDK_LOAD_CONFIG":"true",
+                "GF_AUTH_SIGV4_AUTH_ENABLED":"true"
+            }
         )
         grafana_container.add_port_mappings(
             ecs.PortMapping(container_port=3000, protocol=ecs.Protocol.TCP)
@@ -205,9 +232,19 @@ class EcsStack(Stack):
                     "LineFormat": "key_value",
                     "RemoveKeys": "container_id,ecs_task_arn"
                 }
-            )
+            ),
+            environment={
+                "OTEL_SERVICE_NAME": "logger-app",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+                "OTEL_TRACES_SAMPLER": "parentbased_always_on",
+                # "AWS_XRAY_DAEMON_ADDRESS": "aws-otel-collector:2000",
+                "AWS_REGION": "us-east-1",
+                "SQS_MESSAGE_QUEUE_URL": sqs_stack.message_queue.queue_url,
+                "DYNAMODB_APP_TABLE": dynamodb_stack.app_table.table_name,
+                
+            }
         )
-    
+
         logger_container.add_port_mappings(
             ecs.PortMapping(container_port=8080, protocol=ecs.Protocol.TCP)
         )
@@ -222,8 +259,8 @@ class EcsStack(Stack):
                 ),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="firelens")
         )
-
-        # Logger Service
+        
+        
         logger_service = ecs.FargateService(
             self, "LoggerService",
             service_name="logger-service",
@@ -232,9 +269,91 @@ class EcsStack(Stack):
             security_groups=[ecs_sg],
             desired_count=1,
             assign_public_ip=True,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
         )
-        # Register ECS services as targets in their respective target groups
-        alb_stack.logger_tg.add_target(logger_service)
+    
+        adot_collector_container = logger_task_def.add_container(
+            "AdotCollector",
+            image=ecs.ContainerImage.from_registry("public.ecr.aws/aws-observability/aws-otel-collector:latest"),
+            essential=False,
+            logging=ecs.LogDriver.aws_logs(stream_prefix="adot-collector"),
+            environment={
+                "AWS_REGION": "us-east-1",
+                "AWS_XRAY_TRACING_NAME": "logger-app",
+                "OTEL_RESOURCE_ATTRIBUTES": "service.name=logger-app,service.version=1.0.0",
+                "AOT_CONFIG_CONTENT": f"""receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  awsecscontainermetrics:
+    collection_interval: 10s
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  filter:
+    metrics:
+      include:
+        match_type: strict
+        metric_names:
+          - ecs.task.memory.utilized
+          - ecs.task.memory.reserved
+          - ecs.task.cpu.utilized
+          - ecs.task.cpu.reserved
+          - ecs.task.network.rate.rx
+          - ecs.task.network.rate.tx
+          - ecs.task.storage.read_bytes
+          - ecs.task.storage.write_bytes
+exporters:
+  awsxray:
+    region: us-east-1
+  prometheusremotewrite:
+    endpoint: {amp_workspace.attr_prometheus_endpoint}api/v1/remote_write
+    auth:
+      authenticator: sigv4auth
+extensions:
+  health_check:
+  pprof:
+    endpoint: :1888
+  zpages:
+    endpoint: :55679
+  sigv4auth:
+    region: us-east-1
+    service: aps
+service:
+  extensions: [pprof, zpages, health_check, sigv4auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheusremotewrite]
+    metrics/ecs:
+      receivers: [awsecscontainermetrics]
+      processors: [filter]
+      exporters: [prometheusremotewrite]"""
+            }
+        )
+
+        adot_collector_container.add_port_mappings(
+            ecs.PortMapping(container_port=4317, protocol=ecs.Protocol.TCP)
+        )
+        adot_collector_container.add_port_mappings(
+            ecs.PortMapping(container_port=4318, protocol=ecs.Protocol.TCP)
+        )
+        adot_collector_container.add_port_mappings(
+            ecs.PortMapping(container_port=1888, protocol=ecs.Protocol.TCP)
+        )
+        adot_collector_container.add_port_mappings(
+            ecs.PortMapping(container_port=55679, protocol=ecs.Protocol.TCP)
+        )
+        
         alb_stack.grafana_tg.add_target(grafana_service)
         alb_stack.loki_tg.add_target(loki_service) 
+        alb_stack.logger_tg.add_target(logger_service)

@@ -60,3 +60,4 @@ class SgStack(Stack):
         self.ecs_sg.add_ingress_rule(self.alb_sg, ec2.Port.tcp(8080), "Allow Logger app from ALB")
         self.ecs_sg.add_ingress_rule(self.internal_alb_sg, ec2.Port.tcp(3000), "Allow Grafana from ALB")
         self.ecs_sg.add_ingress_rule(self.internal_alb_sg, ec2.Port.tcp(3100), "Allow Loki from ALB")
+        self.ecs_sg.add_ingress_rule(self.internal_alb_sg, ec2.Port.tcp(9090), "Allow Prometheus from ALB")

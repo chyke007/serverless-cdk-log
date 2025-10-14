@@ -1,0 +1,57 @@
+name: Trivy Image Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+
+      - name: Build logger image (no push)
+        run: |
+          docker build -t logger-app:ci -f Dockerfile .
+
+      - name: Create SARIF directory
+        run: |
+          mkdir -p sarif-results
+
+      - name: Trivy FS scan (repo)
+        run: |
+          trivy fs --format sarif -o sarif-results/fs.sarif --exit-code 0 --severity MEDIUM,HIGH,CRITICAL .
+
+      - name: Trivy image scan (logger)
+        run: |
+          trivy image --format sarif -o sarif-results/image.sarif --exit-code 0 --severity HIGH,CRITICAL logger-app:ci
+
+      - name: Upload FS SARIF
+        if: always() && hashFiles('sarif-results/fs.sarif')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sarif-results/fs.sarif
+          category: trivy-fs
+
+      - name: Upload Image SARIF
+        if: always() && hashFiles('sarif-results/image.sarif')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sarif-results/image.sarif
+          category: trivy-image
+

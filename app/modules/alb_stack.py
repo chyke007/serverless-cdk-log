@@ -34,6 +34,7 @@ class AlbStack(Stack):
             target_type=elbv2.TargetType.IP,
             health_check=elbv2.HealthCheck(path="/login", port="3000")
         )
+
         # Listener with host-based routing
         self.internal_listener = self.internal_alb.add_listener(
             "InternalListener",
@@ -61,6 +62,7 @@ class AlbStack(Stack):
             security_group=alb_sg,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
         )
+
         # Target group for Logger App (public ALB)
         self.logger_tg = elbv2.ApplicationTargetGroup(
             self, "LoggerTargetGroup",
@@ -75,4 +77,4 @@ class AlbStack(Stack):
             port=80,
             protocol=elbv2.ApplicationProtocol.HTTP,
             default_action=elbv2.ListenerAction.forward([self.logger_tg])
-        ) 
+        )
